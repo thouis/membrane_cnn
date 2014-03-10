@@ -1,7 +1,7 @@
 import time
 import sys
 import numpy as np
-import Image
+import imread
 
 #from lib_maxout_gpu import *
 from lib_maxout_python import *
@@ -27,7 +27,7 @@ _, model_path, img_in, img_out = sys.argv[0:4]
 
 network = DeepNetwork(model_path)
 
-input_image = normalize_image_float(np.array(Image.open(img_in)))
+input_image = normalize_image_float(imread.imread(img_in))[:512, :512]
 nx, ny = input_image.shape
 
 pad_by = network.pad_by
@@ -39,14 +39,13 @@ output = network.apply_net(pad_image, perform_pad=False)
 
 print 'Complete in {0:1.4f} seconds'.format(time.time() - start_time)
 
-im = Image.fromarray(np.uint8(output * 255))
-im.save(img_out)
-
+imread.imsave(img_out, np.uint8(output * 255))
 print "Image saved."
 
 import h5py
 f = h5py.File(img_out.replace('.tif', '') + '.h5')
-f['/probabilities'] = output
+f.create_dataset('/probabilities', data=output)
+# f['/probabilities'] = output
 f.close()
 
 print "Probabilities saved."

@@ -27,89 +27,7 @@ def _centered(arr, newsize):
     myslice = [slice(startind[k], endind[k]) for k in range(len(endind))]
     return arr[tuple(myslice)]
 
-gpu_maxout_layer_source = """
-__global__ void maxout_layer( float* input, float* filters, float* bias, float* output,
-    int batches, int channels, int width, int height,
-    int nfilters, int filter_width, int filter_height,
-    int output_width, int output_height,
-    int maxout_size, int maxpool_size)
-{
-    //int batch_index = blockIdx.x * blockDim.x + threadIdx.x;
-    int ochannel_index = blockIdx.x * blockDim.x + threadIdx.x;
-    int oi = blockIdx.y * blockDim.y + threadIdx.y;
-    int oj = blockIdx.z * blockDim.z + threadIdx.z;
-
-    int conv_size = (width - filter_width + 1);
-    int conv_size2 = conv_size * conv_size;
-    int wh = width * height;
-    int input_batchsize = wh * channels;
-    int filter_wh = filter_width * filter_height;
-    int output_wh = output_width * output_height;
-    int output_batchsize = output_wh * (nfilters / maxout_size);
-
-    int start_filter = ochannel_index / maxout_size;
-    int end_filter = start_filter + maxout_size - 1;
-
-    if (ochannel_index < nfilters / maxout_size && oi < output_width && oj < output_height)
-    {
-
-        for (int batch_index = 0; batch_index < batches; ++batch_index)
-        {
-
-                float current_max;
-
-                // Calculate convolution result for output pixel oi, oj with all filters
-                for(int filter_index = start_filter; filter_index <= end_filter; ++filter_index )
-                {
-                    // Maxpool region
-                    for (int i = oi * maxpool_size; i < (oi + 1) * maxpool_size; ++i)
-                    {
-                        for (int j = oj * maxpool_size; j < (oj + 1) * maxpool_size; ++j)
-                        {
-
-                            float conv_sum = 0;
-
-                            // Convolve for all channels
-                            for(int c = 0; c < channels; ++c)
-                            {
-                                for (int fi = 0; fi < filter_width; ++fi)
-                                {
-                                    for (int fj = 0; fj < filter_height; ++fj)
-                                    {
-                                        if (i + fi < width && j + fj < height)
-                                        {
-                                            float in_pix = input[(i + fi) + (j + fj) * width + c * wh + batch_index * input_batchsize];
-                                            float filt_pix = filters[fi + fj * filter_width + (filter_index * channels + c) * filter_wh];
-                                            conv_sum += in_pix * filt_pix;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Add pixel-wise bias
-                            conv_sum += bias[i + j * conv_size + filter_index * conv_size2];
-
-                            // Maxout across channels and maxpool across pixels
-                            if (((filter_index % maxout_size == 0) && (i % maxpool_size == 0) && (j % maxpool_size == 0)) ||
-                                (conv_sum > current_max))
-                            {
-                                current_max = conv_sum;
-                            }
-
-                        }
-                    }
-
-                    if (filter_index % maxout_size == maxout_size - 1)
-                    {
-                        output[oi + oj * output_width + (filter_index / maxout_size) * output_wh + batch_index * output_batchsize] = current_max;
-                    }
-                }
-
-        }
-
-    }
-}
-"""
+gpu_maxout_layer_source = open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'maxout_layer.cu')).read()
 
 gpu_softmax_layer_source = """
 __global__ void softmax_layer( float* input, float* filters, float* bias, float* output,
@@ -207,10 +125,10 @@ class MaxoutMaxpoolLayer(object):
 
         # start with convoludion output size (before maxout and maxpool operations)
         output_size = (nbatches, self.noutputs, self.output_footprint, self.output_footprint)
-        print output_size
+        print "   ", input_image.shape, '->', output_size
 
         block = (int(self.noutputs), 4, 4)
-        grid = (int((self.noutputs - 1) / block[0] + 1), int((self.input_footprint - 1) / block[1] + 1), int((self.input_footprint - 1) / block[2] + 1))
+        grid = (1, int((self.input_footprint - 1) / block[1] + 1), int((self.input_footprint - 1) / block[2] + 1))
 
         if not isinstance(input_image, gpuarray.GPUArray):
             input_image = gpuarray.to_gpu(input_image)
@@ -247,7 +165,8 @@ class SoftmaxLayer(object):
 
         # Calculate feed-forward result
         output_size = (nbatches, self.noutputs, self.output_footprint, self.output_footprint)
-        print output_size
+        print "   ", input_image.shape, '->', output_size
+
 
         block = (BLOCK_BATCHES, BLOCK_PIXELS, BLOCK_PIXELS)
         grid = (int((nbatches - 1) / block[0] + 1), int((self.input_footprint - 1) / block[1] + 1), int((self.input_footprint - 1) / block[2] + 1))
@@ -365,6 +284,7 @@ class DeepNetwork(object):
         output = np.zeros(nbatches, dtype=np.float32)
 
         for block in range(nbatches / BLOCK_BATCHES + 1):
+            print "BLOCK", block, "out of ", nbatches / BLOCK_BATCHES + 1
 
             block_from = block * BLOCK_BATCHES
             block_to = min((block+1) * BLOCK_BATCHES, layer_temp.shape[0])
