@@ -61,7 +61,7 @@ __global__ void maxout_layer(float* input, float* filters, float* bias, float* o
                     conv_sum += BIAS(output_i * maxpool_size + maxpool_i,
                                      output_j * maxpool_size + maxpool_j,
                                      output_channel * maxout_size + maxout_index);
-                    if (current_max == -FLT_MAX)
+                    if (conv_sum > current_max)
                         current_max = conv_sum;
                 }
             }

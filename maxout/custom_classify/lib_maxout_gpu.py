@@ -9,6 +9,7 @@ from numpy.fft import irfftn
 import mahotas
 import time
 import h5py
+import os
 import os.path
 
 import pycuda.autoinit
@@ -16,7 +17,7 @@ import pycuda.driver as cu
 import pycuda.compiler as nvcc
 import pycuda.gpuarray as gpuarray
 
-BLOCK_BATCHES = 1024
+BLOCK_BATCHES = 5
 BLOCK_PIXELS = 1
 
 def _centered(arr, newsize):
@@ -28,8 +29,9 @@ def _centered(arr, newsize):
     myslice = [slice(startind[k], endind[k]) for k in range(len(endind))]
     return arr[tuple(myslice)]
 
+if os.uname()[0] == 'Darwin':
+    nvcc.DEFAULT_NVCC_FLAGS.extend(['-ccbin','/usr/bin/clang', '-Xcompiler', '--stdlib=libstdc++', '--ptxas-options=-v'])
 gpu_maxout_layer_source = open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'maxout_layer.cu')).read()
-
 
 kernels = nvcc.SourceModule(gpu_maxout_layer_source)
 gpu_maxout_layer = kernels.get_function('maxout_layer')
@@ -54,7 +56,6 @@ class MaxoutMaxpoolLayer(object):
         # original dimensions of W: [filter index, input channel, i, j]
         # where filter index = output_channel * maxout_size + maxout_offset
         # rearrange W as [i, j, maxout_offset, input_channel, output_channel]
-        print "WOOO", W.ravel()[:5]
         W2 = W.transpose((2, 3, 1, 0))
         assert W2.shape ==  (kernel_size, kernel_size, ninputs, nkernels)
         W2 = W2.reshape((kernel_size, kernel_size, ninputs, self.noutputs, maxout_size))
@@ -247,6 +248,7 @@ class DeepNetwork(object):
                 block_temp = self.all_layers[layeri].apply_layer(block_temp, nbatches)
                 end_time = time.clock()
                 print('Layer time = %.2fm' % ((end_time - start_time) / 60.))
+                return block_temp.get()
             print ""
 
             if isinstance(block_temp, gpuarray.GPUArray):

@@ -10,7 +10,7 @@ elif os.environ['DEVICE'] == 'python':
     from lib_maxout_python import *
 elif os.environ['DEVICE'] == 'theano':
     from lib_maxout_theano import *
-elif:
+else:
     raise("Choose a device")
 
 #from lib_maxout_theano_batch import *
@@ -46,13 +46,13 @@ output = network.apply_net(pad_image, perform_pad=False)
 
 print 'Complete in {0:1.4f} seconds'.format(time.time() - start_time)
 
-imread.imsave(img_out, np.uint8(output * 255))
-print "Image saved."
-
 import h5py
 f = h5py.File(img_out.replace('.tif', '') + '.h5')
 f.create_dataset('/probabilities', data=output)
 # f['/probabilities'] = output
 f.close()
+
+imread.imsave(img_out, np.uint8(output * 255))
+print "Image saved."
 
 print "Probabilities saved."
