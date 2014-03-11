@@ -2,10 +2,17 @@ import time
 import sys
 import numpy as np
 import imread
+import os
 
-#from lib_maxout_gpu import *
-from lib_maxout_python import *
-#from lib_maxout_theano import *
+if os.environ['DEVICE'] == 'gpu':
+    from lib_maxout_gpu import *
+elif os.environ['DEVICE'] == 'python':
+    from lib_maxout_python import *
+elif os.environ['DEVICE'] == 'theano':
+    from lib_maxout_theano import *
+elif:
+    raise("Choose a device")
+
 #from lib_maxout_theano_batch import *
 
 def normalize_image_float(original_image, saturation_level=0.005):

@@ -1,6 +1,7 @@
 # Library for full image cnn operations
 
 import numpy as np
+import scipy.signal
 import scipy.ndimage
 #from scipy.signal import convolve2d
 #from scipy.signal import fftconvolve
@@ -20,7 +21,7 @@ def _centered(arr, newsize):
     return arr[tuple(myslice)]
 
 class MaxoutMaxpoolLayer(object):
-    def __init__(self, nkernels, ninputs, kernel_size, stride_in, maxpool_size, maxout_size, W, b):
+    def __init__(self, nkernels, ninputs, kernel_size, stride_in, maxpool_size, maxout_size, W=None, b=None):
         self.ninputs = ninputs
         self.nkernels = nkernels
         self.kernel_size = kernel_size
@@ -43,8 +44,8 @@ class MaxoutMaxpoolLayer(object):
         # Calculate feed-forward result
         assert(input_image.shape[1] == self.ninputs)
 
-        #output = np.zeros(output_size, dtype=np.float32)
-        output = np.tile(self.b, (input_image.shape[0], 1, 1, 1))
+        # initialize output with biases
+        output = np.tile(self.b, (input_image.shape[0], 1, 1, 1)).astype(np.float32)
 
         crop_low = (self.kernel_size - 1) / 2
         crop_high = (self.kernel_size) / 2
@@ -61,11 +62,12 @@ class MaxoutMaxpoolLayer(object):
                 for filteri in range(self.nkernels):
 
                     # Space domain convolution (ndimage)
-                    output[batchi, filteri, :, :] += scipy.ndimage.convolve(
-                       channel_input,
-                       channel_filters[filteri,:,:],
-                       mode='constant')[crop_low:-crop_high, crop_low:-crop_high]
+                    output[batchi, filteri, :, :] += \
+                        scipy.signal.convolve2d(channel_input,
+                                              channel_filters[filteri,:,:],
+                                              mode='valid')
 
+                # Done above at initialization
                 #output[batchi, filteri, :, :] += self.b[filteri, :, :]
 
             if batchi % 100 == 99:

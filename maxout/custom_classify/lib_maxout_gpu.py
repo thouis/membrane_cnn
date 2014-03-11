@@ -9,6 +9,7 @@ from numpy.fft import irfftn
 import mahotas
 import time
 import h5py
+import os.path
 
 import pycuda.autoinit
 import pycuda.driver as cu
@@ -29,81 +30,13 @@ def _centered(arr, newsize):
 
 gpu_maxout_layer_source = open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'maxout_layer.cu')).read()
 
-gpu_softmax_layer_source = """
-__global__ void softmax_layer( float* input, float* filters, float* bias, float* output,
-    int batches, int channels, int width, int height,
-    int nfilters, int filter_size,
-    int output_width, int output_height)
-{
-    int batch_index = blockIdx.x * blockDim.x + threadIdx.x;
-    int oi = blockIdx.y * blockDim.y + threadIdx.y;
-    int oj = blockIdx.z * blockDim.z + threadIdx.z;
 
-    int wh = width * height;
-    int input_batchsize = wh * channels;
-    int output_wh = output_width * output_height;
-    int output_batchsize = output_wh * nfilters;
-
-    if (batch_index < batches && oi < output_width && oj < output_height)
-    {
-        float current_max;
-
-        for(int filter_index = 0; filter_index < nfilters; ++filter_index )
-        {
-            float dot_product = 0;
-
-            // Calculate dot product for output pixel oi, oj
-            for (int fi = 0; fi < filter_size; ++fi)
-            {
-                for (int fj = 0; fj < filter_size; ++fj)
-                {
-                    for(int c = 0; c < channels; ++c)
-                    {
-                        float in_pix = input[(oi + fi) + (oj + fj) * width + c * wh + batch_index * input_batchsize];
-                        float filt_pix = filters[filter_index + c * nfilters + fi * channels * nfilters + fj * filter_size * channels * nfilters];
-                        dot_product += in_pix * filt_pix;
-                    }
-                }
-            }
-
-            dot_product += bias[filter_index];
-
-            if ((filter_index == 0) || (dot_product > current_max))
-            {
-                current_max = dot_product;
-            }
-
-            output[oi + oj * output_width + filter_index * output_wh + batch_index * output_batchsize] = dot_product;
-
-        }
-
-        // Softmax
-
-        float esum = 0;
-
-        for(int filter_index = 0; filter_index < nfilters; ++filter_index )
-        {
-            float softout = output[oi + oj * output_width + filter_index * output_wh + batch_index * output_batchsize];
-            softout = __expf(softout - current_max);
-            //softout = expf(softout - current_max);
-            esum += softout;
-            output[oi + oj * output_width + filter_index * output_wh + batch_index * output_batchsize] = softout;
-        }
-
-        for(int filter_index = 0; filter_index < nfilters; ++filter_index )
-        {
-            output[oi + oj * output_width + filter_index * output_wh + batch_index * output_batchsize] /= esum;
-        }
-
-    }
-}
-"""
-
-gpu_maxout_layer = nvcc.SourceModule(gpu_maxout_layer_source).get_function('maxout_layer')
-gpu_softmax_layer = nvcc.SourceModule(gpu_softmax_layer_source).get_function('softmax_layer')
+kernels = nvcc.SourceModule(gpu_maxout_layer_source)
+gpu_maxout_layer = kernels.get_function('maxout_layer')
+gpu_softmax_layer = kernels.get_function('softmax_layer')
 
 class MaxoutMaxpoolLayer(object):
-    def __init__(self, nkernels, ninputs, kernel_size, stride_in, maxpool_size, maxout_size, W, b):
+    def __init__(self, nkernels, ninputs, kernel_size, stride_in, maxpool_size, maxout_size, W=None, b=None):
         self.ninputs = ninputs
         self.nkernels = nkernels
         self.kernel_size = kernel_size
@@ -111,24 +44,39 @@ class MaxoutMaxpoolLayer(object):
         self.maxout_size = maxout_size
         self.stride_in = stride_in
         self.stride_out = stride_in
-        self.noutputs = nkernels / maxpool_size
+        self.noutputs = nkernels / maxout_size
         # Size of previous convolution operation (for fft result cache)
         self.prev_conv_size = 0
         # Input / output footprint - set once full network has been constructed
         self.input_footprint = 0
         self.output_footprint = 0
 
-        self.W = gpuarray.to_gpu(W.copy())
-        self.b = gpuarray.to_gpu(b)
+        # original dimensions of W: [filter index, input channel, i, j]
+        # where filter index = output_channel * maxout_size + maxout_offset
+        # rearrange W as [i, j, maxout_offset, input_channel, output_channel]
+        print "WOOO", W.ravel()[:5]
+        W2 = W.transpose((2, 3, 1, 0))
+        assert W2.shape ==  (kernel_size, kernel_size, ninputs, nkernels)
+        W2 = W2.reshape((kernel_size, kernel_size, ninputs, self.noutputs, maxout_size))
+        W2 = W2.transpose((0, 1, 4, 2, 3))
+        assert W2.shape ==  (kernel_size, kernel_size, maxout_size, ninputs, self.noutputs)
+
+        # b is (output_channel * maxout_size, output_height * maxpool_size, output_width * maxpool_size)
+        # transpose to (h, w, oc)
+        b2 = b.transpose((1, 2, 0))
+        print "Bshape", b2.shape, b2.dtype, W2.dtype
+
+        self.W = gpuarray.to_gpu(W2.copy())
+        self.b = gpuarray.to_gpu(b2.copy())
 
     def apply_layer(self, input_image, nbatches):
-
-        # start with convoludion output size (before maxout and maxpool operations)
-        output_size = (nbatches, self.noutputs, self.output_footprint, self.output_footprint)
+        output_size = (nbatches, self.output_footprint, self.output_footprint, self.noutputs, )
         print "   ", input_image.shape, '->', output_size
 
-        block = (int(self.noutputs), 4, 4)
-        grid = (1, int((self.input_footprint - 1) / block[1] + 1), int((self.input_footprint - 1) / block[2] + 1))
+        block = (4, 4, self.noutputs)
+        grid = (((self.output_footprint - 1) / block[0]) + 1,
+                ((self.output_footprint - 1) / block[1]) + 1,
+                nbatches)
 
         if not isinstance(input_image, gpuarray.GPUArray):
             input_image = gpuarray.to_gpu(input_image)
@@ -136,11 +84,11 @@ class MaxoutMaxpoolLayer(object):
         d_maxout_result = gpuarray.zeros(long(np.prod(output_size)), np.float32).reshape(output_size)
 
         gpu_maxout_layer(input_image, self.W, self.b, d_maxout_result,
-            np.int32(nbatches), np.int32(self.ninputs), np.int32(self.input_footprint), np.int32(self.input_footprint),
-            np.int32(self.W.shape[0]), np.int32(self.W.shape[2]), np.int32(self.W.shape[3]),
-            np.int32(output_size[2]), np.int32(output_size[3]),
-            np.int32(self.maxout_size), np.int32(self.maxpool_size),
-            block=block, grid=grid)
+                         np.int32(nbatches),
+                         np.int32(self.ninputs), np.int32(self.input_footprint), np.int32(self.input_footprint),
+                         np.int32(self.noutputs), np.int32(self.output_footprint), np.int32(self.output_footprint),
+                         np.int32(self.kernel_size), np.int32(self.maxout_size), np.int32(self.maxpool_size),
+                         block=block, grid=grid)
 
         print "MO Layer: Complete."
 
@@ -177,10 +125,11 @@ class SoftmaxLayer(object):
         d_softmax_result = gpuarray.zeros(long(np.prod(output_size)), np.float32).reshape(output_size)
 
         gpu_softmax_layer(input_image, self.W, self.b, d_softmax_result,
-            np.int32(nbatches), np.int32(self.ninputs), np.int32(self.input_footprint), np.int32(self.input_footprint),
-            np.int32(self.W.shape[1]), np.int32(self.input_footprint),
-            np.int32(output_size[2]), np.int32(output_size[3]),
-            block=block, grid=grid)
+                          np.int32(nbatches),
+                          np.int32(self.ninputs), np.int32(self.input_footprint), np.int32(self.input_footprint),
+                          np.int32(self.noutputs), np.int32(self.output_footprint), np.int32(self.output_footprint),
+                          self.kernel_size,
+                          block=block, grid=grid)
 
         print "SM Layer: Complete."
 
@@ -269,14 +218,14 @@ class DeepNetwork(object):
         ny = input_image.shape[1] - self.all_layers[0].input_footprint + 1
         nbatches = nx * ny
 
-        layer_temp = np.zeros((nbatches, 1, self.all_layers[0].input_footprint, self.all_layers[0].input_footprint), dtype=np.float32)
+        layer_temp = np.zeros((nbatches, self.all_layers[0].input_footprint, self.all_layers[0].input_footprint, 1), dtype=np.float32)
         print layer_temp.shape
 
         batchi = 0
         for x in range(nx):
             for y in range(ny):
                 #print (x,y)
-                layer_temp[batchi, :, :, :] = input_image[x:(x + self.all_layers[0].input_footprint), y:(y + self.all_layers[0].input_footprint)]
+                layer_temp[batchi, :, :, 0] = input_image[x:(x + self.all_layers[0].input_footprint), y:(y + self.all_layers[0].input_footprint)]
                 batchi += 1
 
         assert batchi == nbatches
@@ -293,11 +242,12 @@ class DeepNetwork(object):
             block_temp = layer_temp[block_from:block_to,:,:,:]
 
             for layeri in range(len(self.all_layers)):
-                print layeri
+                print "running layer", layeri
                 start_time = time.clock()
                 block_temp = self.all_layers[layeri].apply_layer(block_temp, nbatches)
                 end_time = time.clock()
                 print('Layer time = %.2fm' % ((end_time - start_time) / 60.))
+            print ""
 
             if isinstance(block_temp, gpuarray.GPUArray):
                 block_temp = block_temp.get()
