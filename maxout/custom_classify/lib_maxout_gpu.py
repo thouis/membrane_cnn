@@ -65,7 +65,6 @@ class MaxoutMaxpoolLayer(object):
         # b is (output_channel * maxout_size, output_height * maxpool_size, output_width * maxpool_size)
         # transpose to (h, w, oc)
         b2 = b.transpose((1, 2, 0))
-        print "Bshape", b2.shape, b2.dtype, W2.dtype
 
         self.W = gpuarray.to_gpu(W2.copy())
         self.b = gpuarray.to_gpu(b2.copy())
@@ -107,18 +106,17 @@ class SoftmaxLayer(object):
         self.input_footprint = 0
         self.output_footprint = 0
 
-        self.W = gpuarray.to_gpu(W)
+        self.W = gpuarray.to_gpu(W.T.copy())
         self.b = gpuarray.to_gpu(b)
 
     def apply_layer(self, input_image, nbatches):
 
         # Calculate feed-forward result
-        output_size = (nbatches, self.noutputs, self.output_footprint, self.output_footprint)
+        output_size = (nbatches, self.noutputs)
         print "   ", input_image.shape, '->', output_size
 
-
-        block = (BLOCK_BATCHES, BLOCK_PIXELS, BLOCK_PIXELS)
-        grid = (int((nbatches - 1) / block[0] + 1), int((self.input_footprint - 1) / block[1] + 1), int((self.input_footprint - 1) / block[2] + 1))
+        block = (64, 1, 1)
+        grid = (1, nbatches)
 
         if not isinstance(input_image, gpuarray.GPUArray):
             input_image = gpuarray.to_gpu(input_image)
@@ -127,9 +125,7 @@ class SoftmaxLayer(object):
 
         gpu_softmax_layer(input_image, self.W, self.b, d_softmax_result,
                           np.int32(nbatches),
-                          np.int32(self.ninputs), np.int32(self.input_footprint), np.int32(self.input_footprint),
-                          np.int32(self.noutputs), np.int32(self.output_footprint), np.int32(self.output_footprint),
-                          self.kernel_size,
+                          np.int32(self.W.shape[1]), np.int32(self.W.shape[0]),
                           block=block, grid=grid)
 
         print "SM Layer: Complete."
@@ -248,7 +244,7 @@ class DeepNetwork(object):
                 block_temp = self.all_layers[layeri].apply_layer(block_temp, nbatches)
                 end_time = time.clock()
                 print('Layer time = %.2fm' % ((end_time - start_time) / 60.))
-                return block_temp.get()
+            return block_temp.get()
             print ""
 
             if isinstance(block_temp, gpuarray.GPUArray):

@@ -1,4 +1,5 @@
 #include <float.h>
+#include <stdio.h>
 
 /* NB: these macros assume their arguments have already been parenthesized */
 #define STRIDED3(i, j, k, sj, sk) (k + sk * (j + sj * i))
@@ -33,7 +34,7 @@ __global__ void maxout_layer(float* input, float* filters, float* bias, float* o
         (batch_idx < batches)) {
 
         float current_max = -FLT_MAX;
-        
+
         // maxpool region
         int base_input_i = output_i * maxpool_size;
         int base_input_j = output_j * maxpool_size;
@@ -50,7 +51,7 @@ __global__ void maxout_layer(float* input, float* filters, float* bias, float* o
                                 for(int input_c = 0; input_c < input_channels; input_c++) {
                                     // input - fastest variation by channel.
                                     // every thread in a warp reads the same pixel at the same time
-                                    
+
                                     float in_pix = INPUT(batch_idx, i + fi, j + fj, input_c);
                                     float filt_pix = FILTERS(fi, fj, maxout_index, input_c, output_channel);
                                     conv_sum += in_pix * filt_pix;
@@ -74,70 +75,57 @@ __global__ void maxout_layer(float* input, float* filters, float* bias, float* o
 
 __global__ void softmax_layer(float* input, float* filters, float* bias, float* output,
                               int batches,
-                              int input_channels, int input_width, int input_height,
-                              int output_channels, int output_width, int output_height,
-                              int filter_size)
+                              int num_weights, int num_outputs)
 {
-    int batch_index = blockIdx.x * blockDim.x + threadIdx.x;
-    int oi = blockIdx.y * blockDim.y + threadIdx.y;
-    int oj = blockIdx.z * blockDim.z + threadIdx.z;
+    unsigned int tid = threadIdx.x;
+    unsigned int batchid = blockIdx.y;
+    volatile __shared__ float s[64];
+    volatile __shared__ float max;
+    volatile __shared__ float sum;
 
-#undef INPUT
-#undef FILTERS
-#undef OUTPUT
-#define INPUT(_bi, _i, _j, _ic) input[STRIDED4((_bi), (_i), (_j), (_ic), input_height, input_width, input_channels)]
-#define FILTERS(_i, _j, _input_c, _output_c) \
-    filters[STRIDED4((_i), (_j), (_input_c), (_output_c), filter_size, input_channels, output_channels)]
-#define OUTPUT(_bi, _i, _j, _oc) output[STRIDED4((_bi), (_i), (_j), (_oc), output_height, output_width, output_channels)]
+    int input_start = batchid * num_weights;
 
+    max = -FLT_MAX;
+    if (tid < 64) {
+        for (int output_channel = 0; output_channel < num_outputs; output_channel++) {
+            s[tid] = 0.0;
+            // load and scale
+            for (int base = 0; base < num_weights; base += 64) {
+                if (base + tid < num_weights)
+                    s[tid] += filters[base + tid + output_channel * num_weights] * input[base + tid + input_start];
+            }
 
-    if (batch_index < batches && oi < output_width && oj < output_height)
-    {
-        float current_max;
+            __syncthreads();
 
-        for(int output_channel = 0; output_channel < output_channels; output_channel++)
-        {
-            float dot_product = 0;
+            // reduction on single warp
+            if (tid < 32) {
+                s[tid] += s[tid + 32];
+                s[tid] += s[tid + 16];
+                s[tid] += s[tid + 8];
+                s[tid] += s[tid + 4];
+                s[tid] += s[tid + 2];
+                s[tid] += s[tid + 1];
 
-            // Calculate dot product for output pixel oi, oj
-            for (int fi = 0; fi < filter_size; ++fi)
-            {
-                for (int fj = 0; fj < filter_size; ++fj)
-                {
-                    for(int input_c = 0; input_c < input_channels; input_c++)
-                    {
-                        float in_pix = INPUT(batch_index, oi + fi, oj + fj, input_c);
-                        float filt_pix = FILTERS(fi, fj, input_c, output_channel);
-                        dot_product += in_pix * filt_pix;
-                    }
+                if (tid == 0) {
+                    // write back temporary result
+                    float tmp = s[tid] + bias[output_channel];
+                    output[batchid * num_outputs + output_channel] = tmp;
+                    if (tmp > max) max = tmp;
                 }
             }
+            __syncthreads(); // prevent threads >= 32 from overwriting previous iteration too early.
+        }
 
-            dot_product += bias[output_channel];
-
-            if ((output_channel == 0) || (dot_product > current_max))
-            {
-                current_max = dot_product;
+        // compute softmax
+        if (tid < num_outputs) {
+            s[tid] = __expf(output[batchid * num_outputs + tid] - max);
+            if (tid == 0) {
+                sum = 0.0;
+                for (int idx = 0; idx < num_outputs; idx++) {
+                    sum += s[idx];
+                }
             }
-
-            OUTPUT(batch_index, oi, oj, output_channel) = dot_product;
-        }
-
-        // Softmax
-
-        float esum = 0;
-
-        for(int output_channel = 0; output_channel < output_channels; ++output_channel )
-        {
-            float softout = OUTPUT(batch_index, oi, oj, output_channel);
-            softout = __expf(softout - current_max);
-            esum += softout;
-            OUTPUT(batch_index, oi, oj, output_channel) = softout;
-        }
-
-        for(int output_channel = 0; output_channel < output_channels; ++output_channel )
-        {
-            OUTPUT(batch_index, oi, oj, output_channel) /= esum;
+            output[batchid * num_outputs + tid] = s[tid] / sum;
         }
     }
 }
