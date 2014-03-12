@@ -17,7 +17,7 @@ import pycuda.driver as cu
 import pycuda.compiler as nvcc
 import pycuda.gpuarray as gpuarray
 
-BLOCK_BATCHES = 5
+BLOCK_BATCHES = 512
 BLOCK_PIXELS = 1
 
 def _centered(arr, newsize):
@@ -234,23 +234,22 @@ class DeepNetwork(object):
 
             block_from = block * BLOCK_BATCHES
             block_to = min((block+1) * BLOCK_BATCHES, layer_temp.shape[0])
-            nbatches = block_to - block_from
+            batchsize = block_to - block_from
 
             block_temp = layer_temp[block_from:block_to,:,:,:]
 
             for layeri in range(len(self.all_layers)):
                 print "running layer", layeri
                 start_time = time.clock()
-                block_temp = self.all_layers[layeri].apply_layer(block_temp, nbatches)
+                block_temp = self.all_layers[layeri].apply_layer(block_temp, batchsize)
                 end_time = time.clock()
-                print('Layer time = %.2fm' % ((end_time - start_time) / 60.))
-            return block_temp.get()
+                print('Layer time = %.3fm' % ((end_time - start_time) / 60.))
             print ""
 
             if isinstance(block_temp, gpuarray.GPUArray):
                 block_temp = block_temp.get()
 
-            output[block_from:block_to] = block_temp[:,0,0,0]
+            output[block_from:block_to] = block_temp[:,0]
 
         output = output.reshape(nx, ny)
 

@@ -135,7 +135,6 @@ class SoftmaxLayer(object):
                 print "SM Layer: Done batch {0}, of {1}.".format(batchi + 1, nbatches)
 
         #Apply softmax
-        #print output
         maxes = np.amax(output, axis=1).reshape((nbatches, 1, output_size[2], output_size[3]))
         maxes = np.tile(maxes, (1,2,1,1))
         e = np.exp(output - maxes)
@@ -243,7 +242,6 @@ class DeepNetwork(object):
         for layeri in range(len(self.all_layers)):
             print 'Layer {0}.'.format(layeri)
             layer_temp = self.all_layers[layeri].apply_layer(layer_temp[:5, ...])
-        return layer_temp
 
         output_image = layer_temp[:,0,0,0].reshape(nx, ny)
 
