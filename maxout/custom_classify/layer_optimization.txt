@@ -1,0 +1,57 @@
+Filter sizes are WxHxInputxOutput
+
+Layer 0:
+      Input - 49x49x1 = 2401
+      Output - 23x23x32 = 16928
+      Maxout 2, Maxpool 2
+      Filter - 4x4x1x64  = 1024
+      Bias - 46x46x64 = 135424
+
+Layer 1
+      Input - 23x23x32 = 16928
+      Output - 10x10x32 = 3200
+      Maxout 2, Maxpool 2
+      Filter - 4x4x32x64  = 32768
+      Bias - 20x20x64 = 25600
+
+Layer 2
+      Input - 10x10x32 = 3200
+      Output - 3x3x32 = 288
+      Maxout 4, Maxpool 2
+      Filter - 5x5x32x128 = 102400
+      Bias - 6x6x128 = 4608
+
+Layer 3
+      Input - 288
+      Output - 2
+      Filter - 288x2 = 576
+
+
+Total intermediate results = 16928 + 3200 + 288
+
+
+48 KB texture cache:
+   4KB layer0 filter
+   
+   
+   
+Load all filters via texture cache. (__ldg) ?
+
+
+Layer 0 - 
+      input here can be bytes (scaled by 1/255).
+      block size = (256, 1)
+      Load input into shared memory  (2.4Kfloats)
+      Each thread computes one output layer
+         23x23x2x4x4 operations (17K ish)
+      Every thread launches layer1<<<32, 1>>>
+      cudaDeviceSync
+      Every thread launches layer2<<<32, 1>>>
+
+Layer1 - 
+       32 groups of 32 threads
+       each block works on one output layer (10x10 floats) - work in
+           shared memory  .4Kb
+       each block needs 4x4x1x64 filter 4Kb
+       Read each input pixel once (input channels)
+       
