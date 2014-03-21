@@ -17,6 +17,8 @@ import pycuda.driver as cu
 import pycuda.compiler as nvcc
 import pycuda.gpuarray as gpuarray
 
+pycuda.autoinit.context.set_cache_config(cu.func_cache.PREFER_L1)
+
 BLOCK_BATCHES = 512
 BLOCK_PIXELS = 1
 
@@ -30,10 +32,13 @@ def _centered(arr, newsize):
     return arr[tuple(myslice)]
 
 if os.uname()[0] == 'Darwin':
-    nvcc.DEFAULT_NVCC_FLAGS.extend(['-ccbin','/usr/bin/clang', '-Xcompiler', '--stdlib=libstdc++', '--ptxas-options=-v'])
+    nvcc.DEFAULT_NVCC_FLAGS.extend(['-ccbin','/usr/bin/clang', '-Xcompiler', '--stdlib=libstdc++'])
+nvcc.DEFAULT_NVCC_FLAGS.append('--ptxas-options=-v')
+
+
 gpu_maxout_layer_source = open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'maxout_layer.cu')).read()
 
-kernels = nvcc.SourceModule(gpu_maxout_layer_source)
+kernels = nvcc.SourceModule(gpu_maxout_layer_source, no_extern_c=True)
 gpu_maxout_layer = kernels.get_function('maxout_layer')
 gpu_softmax_layer = kernels.get_function('softmax_layer')
 
@@ -73,7 +78,7 @@ class MaxoutMaxpoolLayer(object):
         output_size = (nbatches, self.output_footprint, self.output_footprint, self.noutputs, )
         print "   ", input_image.shape, '->', output_size
 
-        block = (4, 4, self.noutputs)
+        block = (2, 4, self.noutputs)
         grid = (((self.output_footprint - 1) / block[0]) + 1,
                 ((self.output_footprint - 1) / block[1]) + 1,
                 nbatches)
@@ -85,12 +90,12 @@ class MaxoutMaxpoolLayer(object):
 
         gpu_maxout_layer(input_image, self.W, self.b, d_maxout_result,
                          np.int32(nbatches),
-                         np.int32(self.ninputs), np.int32(self.input_footprint), np.int32(self.input_footprint),
-                         np.int32(self.noutputs), np.int32(self.output_footprint), np.int32(self.output_footprint),
+                         np.int32(self.ninputs), np.int32(self.input_footprint),
+                         np.int32(self.noutputs), np.int32(self.output_footprint),
                          np.int32(self.kernel_size), np.int32(self.maxout_size), np.int32(self.maxpool_size),
                          block=block, grid=grid)
 
-        print "MO Layer: Complete."
+        print "    MO Layer: Complete."
 
         return d_maxout_result
 
@@ -128,7 +133,7 @@ class SoftmaxLayer(object):
                           np.int32(self.W.shape[1]), np.int32(self.W.shape[0]),
                           block=block, grid=grid)
 
-        print "SM Layer: Complete."
+        print "    SM Layer: Complete."
 
         return d_softmax_result
 
@@ -229,12 +234,14 @@ class DeepNetwork(object):
 
         output = np.zeros(nbatches, dtype=np.float32)
 
-        for block in range(nbatches / BLOCK_BATCHES + 1):
-            print "BLOCK", block, "out of ", nbatches / BLOCK_BATCHES + 1
+        count = 0
+        batch_start_time = time.time()
+        for block_from in range(0, nbatches, BLOCK_BATCHES):
+            count = count + 1
 
-            block_from = block * BLOCK_BATCHES
-            block_to = min((block+1) * BLOCK_BATCHES, layer_temp.shape[0])
+            block_to = min(block_from + BLOCK_BATCHES, layer_temp.shape[0])
             batchsize = block_to - block_from
+            print "Block", block_from, block_to, " (of", nbatches, ")"
 
             block_temp = layer_temp[block_from:block_to,:,:,:]
 
@@ -243,7 +250,9 @@ class DeepNetwork(object):
                 start_time = time.clock()
                 block_temp = self.all_layers[layeri].apply_layer(block_temp, batchsize)
                 end_time = time.clock()
-                print('Layer time = %.3fm' % ((end_time - start_time) / 60.))
+                print('    Layer time = %.3fm' % ((end_time - start_time) / 60.))
+            print "    %.3fm used so far, %.3fm total estimated" % ((time.time() - batch_start_time) / 60.0,
+                                                                    nbatches * (time.time() - batch_start_time) / (60.0 * block_to))
             print ""
 
             if isinstance(block_temp, gpuarray.GPUArray):
@@ -266,5 +275,8 @@ class DeepNetwork(object):
 
         # Crop to valid size
         #output = output[self.pad_by:-self.pad_by,self.pad_by:-self.pad_by]
-
         return output
+
+
+def done():
+    pycuda.autoinit.context.detach()

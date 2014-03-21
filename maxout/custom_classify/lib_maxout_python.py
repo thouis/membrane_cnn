@@ -3,6 +3,7 @@
 import numpy as np
 import scipy.signal
 import scipy.ndimage
+import pylab
 #from scipy.signal import convolve2d
 #from scipy.signal import fftconvolve
 #from numpy.fft import rfftn
@@ -36,10 +37,11 @@ class MaxoutMaxpoolLayer(object):
         self.input_footprint = 0
         self.output_footprint = 0
 
-        self.W = W
-        self.b = b
+        self.W = W.astype(np.float16)
+        self.b = b.astype(np.float16)
 
     def apply_layer(self, input_image):
+        input_image = input_image.astype(np.float16)
 
         # Calculate feed-forward result
         assert(input_image.shape[1] == self.ninputs)
@@ -56,8 +58,8 @@ class MaxoutMaxpoolLayer(object):
 
             for channeli in range(self.ninputs):
 
-                channel_input = input_image[batchi, channeli, :, :]
-                channel_filters = self.W[:,channeli,:,:]
+                channel_input = input_image[batchi, channeli, :, :].astype(np.float32)
+                channel_filters = self.W[:,channeli,:,:].astype(np.float32)
 
                 for filteri in range(self.nkernels):
 
@@ -100,7 +102,7 @@ class MaxoutMaxpoolLayer(object):
 
         print "MO Layer: Complete."
 
-        return output
+        return output.astype(np.float16)
 
 
 class SoftmaxLayer(object):
@@ -119,6 +121,7 @@ class SoftmaxLayer(object):
 
     def apply_layer(self, input_image):
         # Calculate feed-forward result
+        input_image = input_image.astype(np.float32)
         assert(input_image.shape[1] == self.ninputs)
 
         nbatches = input_image.shape[0]
@@ -217,6 +220,26 @@ class DeepNetwork(object):
         self.pad_by = int(self.downsample * (footprint // 2))
 
 
+        for idx, layer in enumerate(all_layers):
+            if isinstance(layer, MaxoutMaxpoolLayer):
+                print "MaxoutLayer"
+                print "    filter size:", layer.kernel_size
+                print "    maxout size:", layer.maxout_size
+                print "    maxpool size:", layer.maxpool_size
+                print "    nkernels:", layer.nkernels
+                print "    W shape:", layer.W.shape, layer.W.max(), layer.W.min()
+                print "    b shape:", layer.b.shape, layer.b.max(), layer.b.min()
+                pylab.figure()
+                pylab.title('W hist layer %d' % idx)
+                pylab.hist(layer.W.ravel(), 50)
+                pylab.figure()
+                pylab.title('B hist layer %d' % idx)
+                pylab.hist(layer.b.ravel(), 50)
+            elif isinstance(layer, SoftmaxLayer):
+                print "SoftmaxLayer"
+                print "    filter shape:", layer.W.shape
+        pylab.show()
+
     def apply_net(self, input_image, perform_downsample=False, perform_pad=False, perform_upsample=False, perform_blur=False, perform_offset=False):
 
         if perform_pad:
@@ -241,7 +264,7 @@ class DeepNetwork(object):
 
         for layeri in range(len(self.all_layers)):
             print 'Layer {0}.'.format(layeri)
-            layer_temp = self.all_layers[layeri].apply_layer(layer_temp[:5, ...])
+            layer_temp = self.all_layers[layeri].apply_layer(layer_temp)
 
         output_image = layer_temp[:,0,0,0].reshape(nx, ny)
 

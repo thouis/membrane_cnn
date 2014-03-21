@@ -7,12 +7,16 @@
 #define STRIDED5(i, j, k, l, m, sj, sk, sl, sm) (m + sm * STRIDED4(i, j, k, l, sj, sk, sl))
 
 
-__global__ void maxout_layer(float* input, float* filters, float* bias, float* output,
-                             int batches,
-                             int input_channels, int input_width, int input_height,
-                             int output_channels, int output_width, int output_height,
-                             int filter_size, int maxout_size, int maxpool_size)
+template<unsigned int FILTER_SIZE, unsigned int MAXOUT_SIZE, unsigned int MAXPOOL_SIZE>
+__device__ void dev_maxout_layer(float* const __restrict__ input,
+                                 float* const __restrict__ filters, 
+                                 float* const __restrict__ bias,
+                                 float* output,
+                                 int batches,
+                                 int input_channels, int input_size,
+                                 int output_channels, int output_size)
 {
+    
     int output_i = (blockIdx.x * blockDim.x) + threadIdx.x;
     int output_j = (blockIdx.y * blockDim.y) + threadIdx.y;
     int output_channel_batch = (blockIdx.z * blockDim.z) + threadIdx.z;
@@ -22,32 +26,33 @@ __global__ void maxout_layer(float* input, float* filters, float* bias, float* o
 
 
     /* These macros parenthesize their calls to STRIDEDX().  See note above. */
-#define INPUT(_bi, _i, _j, _ic) input[STRIDED4((_bi), (_i), (_j), (_ic), input_height, input_width, input_channels)]
+#define INPUT(_bi, _i, _j, _ic) input[STRIDED4((_bi), (_i), (_j), (_ic), input_size, input_size, input_channels)]
 #define FILTERS(_i, _j, _mo, _input_c, _output_c) \
-    filters[STRIDED5((_i), (_j), (_mo), (_input_c), (_output_c), filter_size, maxout_size, input_channels, output_channels)]
-#define OUTPUT(_bi, _i, _j, _oc) output[STRIDED4((_bi), (_i), (_j), (_oc), output_height, output_width, output_channels)]
-#define BIAS(_i, _j, _oc) bias[STRIDED3((_i), (_j), (_oc), output_width * maxpool_size, output_channels * maxout_size)]
+    filters[STRIDED5((_i), (_j), (_mo), (_input_c), (_output_c), FILTER_SIZE, MAXOUT_SIZE, input_channels, output_channels)]
+#define OUTPUT(_bi, _i, _j, _oc) output[STRIDED4((_bi), (_i), (_j), (_oc), output_size, output_size, output_channels)]
+#define BIAS(_i, _j, _oc) bias[STRIDED3((_i), (_j), (_oc), output_size * MAXPOOL_SIZE, output_channels * MAXOUT_SIZE)]
 
-    if ((output_i < output_height) &&
-        (output_j < output_width) &&
+    if ((output_i < output_size) &&
+        (output_j < output_size) &&
         (output_channel < output_channels) &&
         (batch_idx < batches)) {
 
         float current_max = -FLT_MAX;
 
         // maxpool region
-        int base_input_i = output_i * maxpool_size;
-        int base_input_j = output_j * maxpool_size;
-        for (int maxpool_i = 0; maxpool_i < maxpool_size; maxpool_i++) {
-            for (int maxpool_j = 0; maxpool_j < maxpool_size; maxpool_j++) {
+#pragma unroll
+        for (int maxpool_i = 0; maxpool_i < MAXPOOL_SIZE; maxpool_i++) {
+#pragma unroll
+            for (int maxpool_j = 0; maxpool_j < MAXPOOL_SIZE; maxpool_j++) {
                 // maxout filters
-                for (int maxout_index = 0; maxout_index < maxout_size; maxout_index++) {
+#pragma unroll
+                for (int maxout_index = 0; maxout_index < MAXOUT_SIZE; maxout_index++) {
                     float conv_sum = 0;
-                    for (int fi = 0; fi < filter_size; ++fi) {
-                        for (int fj = 0; fj < filter_size; ++fj) {
-                            int i = base_input_i + maxpool_i;
-                            int j = base_input_j + maxpool_j;
-                            if (i + fi < input_height && j + fj < input_width) {
+                    for (int fi = 0; fi < FILTER_SIZE; ++fi) {
+                        for (int fj = 0; fj < FILTER_SIZE; ++fj) {
+                            int i = output_i * MAXPOOL_SIZE + maxpool_i;
+                            int j = output_j * MAXPOOL_SIZE + maxpool_j;
+                            if (i + fi < input_size && j + fj < input_size) {
                                 for(int input_c = 0; input_c < input_channels; input_c++) {
                                     // input - fastest variation by channel.
                                     // every thread in a warp reads the same pixel at the same time
@@ -59,9 +64,9 @@ __global__ void maxout_layer(float* input, float* filters, float* bias, float* o
                             }
                         }
                     }
-                    conv_sum += BIAS(output_i * maxpool_size + maxpool_i,
-                                     output_j * maxpool_size + maxpool_j,
-                                     output_channel * maxout_size + maxout_index);
+                    conv_sum += BIAS(output_i * MAXPOOL_SIZE + maxpool_i,
+                                     output_j * MAXPOOL_SIZE + maxpool_j,
+                                     output_channel * MAXOUT_SIZE + maxout_index);
                     if (conv_sum > current_max)
                         current_max = conv_sum;
                 }
@@ -72,6 +77,29 @@ __global__ void maxout_layer(float* input, float* filters, float* bias, float* o
 }
 
 
+extern "C" {
+__global__ void maxout_layer(float*  input,
+                             float* filters, 
+                             float* bias,
+                             float* output,
+                             int batches,
+                             int input_channels, int input_size,
+                             int output_channels, int output_size,
+                             int filter_size, int maxout_size, int maxpool_size)
+{
+    if (filter_size == 4 && maxout_size == 2 && maxpool_size == 2) {
+        dev_maxout_layer<4,2,2>(input, filters, bias, output, batches,
+                                input_channels, input_size,
+                                output_channels, output_size);
+    }
+    else if (filter_size == 5 && maxout_size == 4 && maxpool_size == 2) {
+        dev_maxout_layer<5,4,2>(input, filters, bias, output, batches,
+                                input_channels, input_size,
+                                output_channels, output_size);
+    }
+    else
+        printf("NO TEMPLATE for %d %d %d\n", filter_size, maxout_size, maxpool_size);
+}
 
 __global__ void softmax_layer(float* input, float* filters, float* bias, float* output,
                               int batches,
@@ -128,4 +156,5 @@ __global__ void softmax_layer(float* input, float* filters, float* bias, float* 
             output[batchid * num_outputs + tid] = s[tid] / sum;
         }
     }
+}
 }

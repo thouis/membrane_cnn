@@ -56,3 +56,4 @@ imread.imsave(img_out, np.uint8(output * 255))
 print "Image saved."
 
 print "Probabilities saved."
+
